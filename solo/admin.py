@@ -1,73 +1,63 @@
-from django.conf.urls import url
 from django.contrib import admin
+from django.core.urlresolvers import reverse
 from django.http import HttpResponseRedirect
+from django.shortcuts import redirect
 
-from solo.models import DEFAULT_SINGLETON_INSTANCE_ID
 
-try:
-    from django.utils.encoding import force_unicode
-except ImportError:
-    from django.utils.encoding import force_text as force_unicode 
-from django.utils.translation import ugettext as _
+def admin_url(model, url, object_id=None):
+    """
+    Returns the URL for the given model and admin url name.
+    From mezzanine.utils.urls.admin_url.
+    """
+    opts = model._meta
+    url = "admin:%s_%s_%s" % (opts.app_label, opts.object_name.lower(), url)
+    args = ()
+    if object_id is not None:
+        args = (object_id,)
+    return reverse(url, args=args)
 
 
 class SingletonModelAdmin(admin.ModelAdmin):
-    object_history_template = "admin/solo/object_history.html"
-    change_form_template = "admin/solo/change_form.html"
+    """
+    Admin class for models that should only contain a single instance
+    in the database. Redirect all views to the change view when the
+    instance exists, and to the add view when it doesn't.
+    From mezzanine.utils.admin.SingletonModelAdmin.
+    """
+
+    def handle_save(self, request, response):
+        """
+        Handles redirect back to the dashboard when save is clicked
+        (eg not save and continue editing), by checking for a redirect
+        response, which only occurs if the form is valid.
+        """
+        form_valid = isinstance(response, HttpResponseRedirect)
+        if request.POST.get("_save") and form_valid:
+            return redirect("admin:index")
+        return response
+
+    def changelist_view(self, *args, **kwargs):
+        """
+        Redirect to the add view if no records exist or the change
+        view if the singleton instance exists.
+        """
+        try:
+            singleton = self.model.objects.get()
+        except self.model.MultipleObjectsReturned:
+            return super(SingletonModelAdmin, self).changelist_view(*args, **kwargs)
+        except self.model.DoesNotExist:
+            return redirect(admin_url(self.model, "add"))
+        return redirect(admin_url(self.model, "change", singleton.id))
 
     def has_add_permission(self, request):
+        """
+        Don't allow creating from the admin.
+        Singleton models are created by the get_solo() class method.
+        """
         return False
 
     def has_delete_permission(self, request, obj=None):
+        """
+        Disable deleting.
+        """
         return False
-
-    def get_urls(self):
-        urls = super(SingletonModelAdmin, self).get_urls()
-
-        # _meta.model_name only exists on Django>=1.6 -
-        # on earlier versions, use module_name.lower()
-        try:
-            model_name = self.model._meta.model_name
-        except AttributeError:
-            model_name = self.model._meta.module_name.lower()
-
-        self.model._meta.verbose_name_plural = self.model._meta.verbose_name
-        url_name_prefix = '%(app_name)s_%(model_name)s' % {
-            'app_name': self.model._meta.app_label,
-            'model_name': model_name,
-        }
-        custom_urls = [
-            url(r'^history/$',
-                self.admin_site.admin_view(self.history_view),
-                {'object_id': str(self.singleton_instance_id)},
-                name='%s_history' % url_name_prefix),
-            url(r'^$',
-                self.admin_site.admin_view(self.change_view),
-                {'object_id': str(self.singleton_instance_id)},
-                name='%s_change' % url_name_prefix),
-        ]
-        # By inserting the custom URLs first, we overwrite the standard URLs.
-        return custom_urls + urls
-
-    def response_change(self, request, obj):
-        msg = _('%(obj)s was changed successfully.') % {'obj': force_unicode(obj)}
-        if '_continue' in request.POST:
-            self.message_user(request, msg + ' ' + _('You may edit it again below.'))
-            return HttpResponseRedirect(request.path)
-        else:
-            self.message_user(request, msg)
-            return HttpResponseRedirect("../../")
-
-    def change_view(self, request, object_id, form_url='', extra_context=None):
-        if object_id == str(self.singleton_instance_id):
-            self.model.objects.get_or_create(pk=self.singleton_instance_id)
-        return super(SingletonModelAdmin, self).change_view(
-            request,
-            object_id,
-            form_url=form_url,
-            extra_context=extra_context,
-        )
-
-    @property
-    def singleton_instance_id(self):
-        return getattr(self.model, 'singleton_instance_id', DEFAULT_SINGLETON_INSTANCE_ID)
